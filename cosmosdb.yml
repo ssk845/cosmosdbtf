@@ -1,0 +1,168 @@
+#target_subscription
+#app_env
+#app_common_name
+#api_type
+#app_number
+#app_family
+
+--- 
+- name: Provision ComosDB Account 
+  
+  hosts: localhost
+  vars_files:
+    - vars/cosmosdb_config.yml
+    - "vars/{{api_type }}_api.yml"
+  enviroemnt: 
+    AZURE_CONFIG_DIR: "/tmp/{{ tower_workflow_job_id }}"
+    # the below enviroment variables are nesscesary to work with terraform plan, and the name HAS to be as follows:
+    ARM_CLIENT_ID: "{{ AZURE_CLIENT_ID }}"
+    ARM_CLIENT_SECRET: "{{ AZURE_SECERT_ID }}"
+    ARM_TENANT_ID: "{{ AZURE_TENANT_ID }}"
+    ARM_SKIP_PROVIDER_REGISTRATION: "true"
+  tasks:
+
+   - name: In Production or LE
+     set_fact:
+      cosmosdb_env_lineup: "nonprod"
+
+   - name: In Production or not 
+     set_fact:
+       cosmosdb_env_lineup: "prod"
+     when: app_env == 'prod'
+
+   - name: Setting susbscition name when look-up value is available
+     set_fact:
+      target_subscrition_name: "{{ subscription_names[target_subscription] }}"
+     when: subscription_names[target_subscription] is defined
+
+   - name: Setting subscritption name with the inpit value
+     set_fact:
+      target_subscription: "{{ target_subscription }}"
+     when: subscription_names[target_subscription] is not defined
+
+   - name: set resource name suffix
+     set_fact:
+      azure_resource_name_suffix: 'cosdb-{{ target_subscription_name }}-{{ app_common_name }}-{{ environment_shorthand[app_env] }}-{{ region_shorthand[app_region] }}{{ app_number }}'
+
+   - name: setting universal vars for all plays
+     set_fact:
+       azure_rg_region: '{{ app_family }}'
+       azure_tags:
+        Repo: 'TDB'
+        App-Family: '{{ app_family }}'
+        Family: '{{ family }}'
+        Environment: '{{ app_env }}'
+       azure_subscription_id: '{{ subscription_ids[target_subscription] }}'
+       azure_cosmosdb_account_name: "bbyc-{{ azure_resource_name_suffix }}"
+
+   - name: Setting Resource Group name
+     set_fact:
+      azure_rg_name: " {{ hostvars['localhost']['azure_resource_group_name'] }}"
+     when: hostvars['localhost']['azure_resource_group_name'] is defined
+  
+   - name: Setting Resource Group Name 
+     set_fact:
+      azure_rg_name: "bbyc-rg- {{ target_subscription_name }}-cosmos_db-{{ region_shorthand[app_region] }}{{ rg_number }}"
+      when: (azure_rg_name_overwrite is defined or azure_rg_name_overwrite == "") and azure_rg_name is undefined
+
+   - name: Setting Resource ID & Private Endpoint Metadata
+     set_fact:
+      private_endpoint_name: 'bbyc-pe-{{ azure_resource_name_suffix }}'
+      private_service_name: 'bbyc-pes-{{ azure_resource_name_suffix }}'
+      private_service_resource_group: '{{ azure_rg_name }}'
+      subresource_id: ' {{ cosmosdb_subresource }}'
+
+   - name: Run Terraform plan to file 
+     terraform: 
+      project_path: '{{ playbook_dir }}'
+      state: planned
+      plan_file: '{{ playbook_dir }}/{{ tfplan_file }}'
+      variables: 
+         cosmosdb_account_name: '{{ azure_cosmosdb_account_name }}'
+         resource_group_name: '{{ azure_rg_name }}'
+         location: '{{ azure_rg_location }}'
+         tags: '{{ azure_tags|to_json }}'
+         cosmosdb_kind: '{{ cosmosdb_kind }}'
+         cosmosdb_capabilities: '{{ cosmosdb_capabilities|to_json }}'
+         tenant_id: '{{ azure_tenant_id }}'
+         subresource_id: '{{ azure_subscription_id }}'
+         cosmosdb_env_lineup: '{{ cosmosdb_env_lineup }}'
+         private_endpoint_name: '{{ private_endpoint_name }}'
+         private_endpoint_rg: '{{ private_endpoint_rgs[target_subscription] }}'
+         private_endpoint_subnet: '{{ private_endopoint_subnets[target_subscription] }}'
+         private_endpoint_subsresource_name: "{{ subresource_id }}"
+         private_endpoint_service_name: "{{ private_service_name }}"
+      force_init: yes
+      backend_config: 
+          storage_account_name: '{{ tfstate_storage[target_subscription] }}'
+          container_name: '{{ tfstate_container[target_subscription] }}'
+          key: '{{ state_file_prefix[target_subscription] }}.{{ azure_rg_name }}.{{ azure_cosmosdb_account_name }}.tfstate'
+          access_key: '{{ tfstate_access_key }}'
+      register: tfplan
+
+   - name: Show tf plan file 
+     shell: 
+     args: 
+      cmd: 'terraform show {{ tfplan_file }} -no-color'
+      chdir: '{{ playbook_dir }}'
+     register: shell_result 
+     when: tf_execution_state == "planned"
+
+   - debug:
+      var: shell_result.stdout_lines
+     when: tf_execution_state == "planned"
+
+   - fail: 
+       msg: Please check the plan and ensure no resources will be deleted 
+     when: tf_execution_state == "planned" and ''.join(shell_result.stdout_lines).find(' 0 to change, 0 to destroy.') == -1
+
+   - name: Run Terraform apply 
+     terraform: 
+      project_path: '{{ playbook_dir }}'
+      state: present
+      plan_file: '{{ playbook_dir }}/{{ tfplan_fike }}'
+      variables:
+         cosmosdb_account_name: "{{ azure_cosmosdb_account_name }}"
+         resource_group_name: "{{ azure_rg_name }}"
+         location: "{{ azure_rg_region }}"
+         tags: '{{ azure_tags|to_json }}'
+         cosmosdb_kind: '{{ cosmosdb_kind }}'
+         cosmosdb_capabilities: '{{ cosmosdb_capabilities|to_json }}'
+         tenant_id: '{{ azure_tenant_id }}'
+         subscription_id: '{{ azure_subscription_id }}'
+         cosmosdb_env_lineup: '{{ cosmosdb_env_lineup }}'
+         private_endpoint_name: '{{ private_endpoint_name }}'
+         private_endpoint_rg: '{{ private_endpoint_rgs[target_subscription] }}'
+         private_endpoint_subnet: '{{ private_endopoint_subnets[target_subscription] }}'
+         private_endpoint_subsresource_name: "{{ subresource_id }}"
+         private_endpoint_service_name: "{{ private_service_name }}"
+      force_init: yes
+      backend_config: 
+          storage_account_name: '{{ tfstate_storage[target_subscription] }}'
+          container_name: '{{ tfstate_container[target_subscription] }}'
+          key: '{{ state_file_prefix[target_subscription] }}.{{ azure_rg_name }}.{{ azure_cosmosdb_account_name }}.tfstate'
+          access_key: '{{ tfstate_access_key }}'
+      when: tf_execution_state != "planned"
+      register: tf_run_result 
+      
+   - debug:
+      var: shell_result.outputs
+     when: tf_execution_state != "planned"
+
+   - name: Setting private endpoint resource id 
+     set_fact:
+        private_endpoint_dest_resource_id: '{{ tf_run_results.outputs.cosmosdb_account_id.value }}'
+     when: tf_execution_state != "planned"
+
+   - set_stats: 
+       data: 
+         private_endpoint_dest_resource_id: '{{ tf_run_result.outputs.cosmosdb_account_id.value }}'
+         private_endpoint_name: 'bbyc-pe-cosmosdb-{{ app_common_name }}'
+         private_service_name: 'bbyc-pes-cosmosdb-{{ app_common_name }}'
+         private_service_resource_group: '{{ azure_rg_name }}'
+         subresource_id: '{{ subresource_id }}'
+     when: tf_execution_state != "planned"          
+
+
+
+    

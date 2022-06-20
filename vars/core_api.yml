@@ -1,0 +1,3 @@
+cosmosdb_kind: "GlobalDocumentDB"
+cosmosdb_capabilities: []
+cosmosdb_subresource: "Sql"
